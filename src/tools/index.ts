@@ -1,0 +1,13 @@
+export { registerForecast } from "./forecast.js";
+export { registerArchive } from "./archive.js";
+export { registerAirQuality } from "./air-quality.js";
+export { registerMarine } from "./marine.js";
+export { registerElevation } from "./elevation.js";
+export { registerGeocoding } from "./geocoding.js";
+export { registerFlood } from "./flood.js";
+export { registerEnsemble } from "./ensemble.js";
+export { registerClimate } from "./climate.js";
+export { registerSeasonal } from "./seasonal.js";
+export { registerDwdIcon } from "./dwd-icon.js";
+export { registerEcmwf } from "./ecmwf.js";
+export { registerScheduleTools } from "./schedule.js";
