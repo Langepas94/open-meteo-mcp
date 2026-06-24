@@ -4,6 +4,16 @@ import { randomUUID } from "crypto";
 import { jobsRepo, readingsRepo } from "../db.js";
 import { startJob, stopJob, isRunning } from "../scheduler.js";
 
+const INTERVAL_CRON: Record<string, string> = {
+  "10min":  "*/10 * * * *",
+  "30min":  "*/30 * * * *",
+  "1h":     "0 * * * *",
+  "6h":     "0 */6 * * *",
+  "12h":    "0 */12 * * *",
+  "daily":  "0 9 * * *",
+  "weekly": "0 9 * * 1",
+};
+
 const PERIOD_MS: Record<string, number> = {
   "1h":  1 * 60 * 60 * 1000,
   "6h":  6 * 60 * 60 * 1000,
@@ -13,49 +23,38 @@ const PERIOD_MS: Record<string, number> = {
   "30d": 30 * 24 * 60 * 60 * 1000,
 };
 
-const sessionParam = z
-  .string()
-  .min(1)
-  .max(128)
-  .describe(
-    "Caller's session/user identifier. Jobs are isolated per session — " +
-    "list_jobs and cancel_job only see jobs created with the same session_id. " +
-    "Use a stable ID (e.g. Telegram user ID, Claude session ID, bot name)."
-  );
-
 export function registerScheduleTools(server: McpServer) {
   // ── schedule_weather_job ────────────────────────────────────────────────
   server.registerTool(
     "schedule_weather_job",
     {
       description:
-        "Create a recurring weather data collection job. " +
-        "The server will fetch weather data on the given cron schedule and persist it locally. " +
-        "Returns a job_id to use with get_weather_summary / cancel_job. " +
-        "Jobs are scoped to session_id — other callers cannot see or cancel your jobs.",
+        "Start periodic weather data collection for a location. " +
+        "Pick an interval and a location — the server collects data automatically in the background. " +
+        "Returns a job_id; use get_weather_summary to read collected data later.",
       inputSchema: z.object({
-        session_id: sessionParam,
+        session_id: z.string().min(1).max(128).describe(
+          "Stable identifier for the caller — set by the bot/client (e.g. Telegram user ID). " +
+          "Isolates jobs between users; the agent should NOT ask the user for this."
+        ),
         location: z.string().describe("Human-readable label, e.g. 'Moscow'"),
         latitude: z.number().min(-90).max(90),
         longitude: z.number().min(-180).max(180),
-        cron_expr: z
-          .string()
-          .describe(
-            "Standard 5-field cron expression. Examples: " +
-            "'0 * * * *' (hourly), '0 9 * * *' (daily 09:00), '*/30 * * * *' (every 30 min)"
-          ),
+        interval: z.enum(["10min", "30min", "1h", "6h", "12h", "daily", "weekly"])
+          .describe("How often to collect data. '10min' = every 10 minutes, 'daily' = once a day at 09:00 UTC."),
         variables: z
           .array(z.string())
           .optional()
           .default(["temperature_2m", "precipitation", "wind_speed_10m", "weather_code"])
-          .describe("Hourly Open-Meteo variables to collect"),
+          .describe("Weather variables to collect. Default covers temperature, rain, wind, conditions."),
       }),
     },
     async (params) => {
+      const cron_expr = INTERVAL_CRON[params.interval];
       const job = {
         id: randomUUID(),
         session_id: params.session_id,
-        cron_expr: params.cron_expr,
+        cron_expr,
         latitude: params.latitude,
         longitude: params.longitude,
         location: params.location,
@@ -65,16 +64,14 @@ export function registerScheduleTools(server: McpServer) {
       jobsRepo.insert(job);
       startJob(job);
       return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              ok: true,
-              job_id: job.id,
-              message: `Job scheduled: ${params.location} every '${params.cron_expr}'`,
-            }),
-          },
-        ],
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            ok: true,
+            job_id: job.id,
+            message: `Collecting weather for ${params.location} every ${params.interval}`,
+          }),
+        }],
       };
     }
   );
@@ -83,22 +80,25 @@ export function registerScheduleTools(server: McpServer) {
   server.registerTool(
     "list_jobs",
     {
-      description: "List active weather collection jobs for this session.",
+      description: "List all active weather collection jobs for this user.",
       inputSchema: z.object({
-        session_id: sessionParam,
+        session_id: z.string().min(1).max(128).describe("Same session_id used when creating jobs."),
       }),
     },
     async (params) => {
-      const jobs = jobsRepo.listBySession(params.session_id).map((j) => ({
-        job_id: j.id,
-        location: j.location,
-        cron_expr: j.cron_expr,
-        coordinates: { lat: j.latitude, lon: j.longitude },
-        variables: j.variables,
-        readings: readingsRepo.countByJob(j.id),
-        running: isRunning(j.id),
-        created_at: new Date(j.created_at).toISOString(),
-      }));
+      const jobs = jobsRepo.listBySession(params.session_id).map((j) => {
+        const interval = Object.entries(INTERVAL_CRON).find(([, c]) => c === j.cron_expr)?.[0] ?? j.cron_expr;
+        return {
+          job_id: j.id,
+          location: j.location,
+          interval,
+          coordinates: { lat: j.latitude, lon: j.longitude },
+          variables: j.variables,
+          readings_collected: readingsRepo.countByJob(j.id),
+          running: isRunning(j.id),
+          created_at: new Date(j.created_at).toISOString(),
+        };
+      });
       return { content: [{ type: "text", text: JSON.stringify(jobs, null, 2) }] };
     }
   );
@@ -108,25 +108,20 @@ export function registerScheduleTools(server: McpServer) {
     "get_weather_summary",
     {
       description:
-        "Retrieve aggregated weather readings collected by a scheduled job. " +
-        "Returns min/max/avg for each numeric variable over the requested period. " +
-        "Requires session_id matching the one used when the job was created.",
+        "Get aggregated weather stats collected by a scheduled job. " +
+        "Returns min/max/avg for each variable over the requested period.",
       inputSchema: z.object({
-        session_id: sessionParam,
+        session_id: z.string().min(1).max(128),
         job_id: z.string().uuid().describe("Job ID from schedule_weather_job or list_jobs"),
-        period: z
-          .enum(["1h", "6h", "12h", "24h", "7d", "30d"])
+        period: z.enum(["1h", "6h", "12h", "24h", "7d", "30d"])
           .optional()
           .default("24h")
-          .describe("Lookback window for aggregation"),
+          .describe("How far back to aggregate"),
       }),
     },
     async (params) => {
       const job = jobsRepo.get(params.job_id);
-      if (!job) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: "Job not found" }) }] };
-      }
-      if (job.session_id !== params.session_id) {
+      if (!job || job.session_id !== params.session_id) {
         return { content: [{ type: "text", text: JSON.stringify({ error: "Job not found" }) }] };
       }
 
@@ -135,18 +130,16 @@ export function registerScheduleTools(server: McpServer) {
 
       if (readings.length === 0) {
         return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({
-                job_id: params.job_id,
-                location: job.location,
-                period: params.period,
-                readings: 0,
-                message: "No data collected yet",
-              }),
-            },
-          ],
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              job_id: params.job_id,
+              location: job.location,
+              period: params.period,
+              readings: 0,
+              message: "No data collected yet — check back after the first interval fires",
+            }),
+          }],
         };
       }
 
@@ -165,27 +158,27 @@ export function registerScheduleTools(server: McpServer) {
 
       const stats: Record<string, { min: number; max: number; avg: number; count: number }> = {};
       for (const [varName, values] of Object.entries(buckets)) {
-        const min = Math.min(...values);
-        const max = Math.max(...values);
-        const avg = values.reduce((a, b) => a + b, 0) / values.length;
-        stats[varName] = { min: +min.toFixed(2), max: +max.toFixed(2), avg: +avg.toFixed(2), count: values.length };
+        stats[varName] = {
+          min: +Math.min(...values).toFixed(2),
+          max: +Math.max(...values).toFixed(2),
+          avg: +(values.reduce((a, b) => a + b, 0) / values.length).toFixed(2),
+          count: values.length,
+        };
       }
 
       return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({
-              job_id: params.job_id,
-              location: job.location,
-              period: params.period,
-              readings_count: readings.length,
-              first_reading: new Date(readings[0].fetched_at).toISOString(),
-              last_reading: new Date(readings[readings.length - 1].fetched_at).toISOString(),
-              stats,
-            }, null, 2),
-          },
-        ],
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            job_id: params.job_id,
+            location: job.location,
+            period: params.period,
+            readings_count: readings.length,
+            first_reading: new Date(readings[0].fetched_at).toISOString(),
+            last_reading: new Date(readings[readings.length - 1].fetched_at).toISOString(),
+            stats,
+          }, null, 2),
+        }],
       };
     }
   );
@@ -194,29 +187,24 @@ export function registerScheduleTools(server: McpServer) {
   server.registerTool(
     "cancel_job",
     {
-      description: "Stop and delete a scheduled weather collection job. Collected data is also deleted.",
+      description: "Stop and delete a scheduled weather collection job.",
       inputSchema: z.object({
-        session_id: sessionParam,
+        session_id: z.string().min(1).max(128),
         job_id: z.string().uuid(),
       }),
     },
     async (params) => {
       const job = jobsRepo.get(params.job_id);
-      if (!job) {
-        return { content: [{ type: "text", text: JSON.stringify({ error: "Job not found" }) }] };
-      }
-      if (job.session_id !== params.session_id) {
+      if (!job || job.session_id !== params.session_id) {
         return { content: [{ type: "text", text: JSON.stringify({ error: "Job not found" }) }] };
       }
       stopJob(params.job_id);
       jobsRepo.delete(params.job_id);
       return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify({ ok: true, message: `Job '${job.location}' cancelled and deleted` }),
-          },
-        ],
+        content: [{
+          type: "text",
+          text: JSON.stringify({ ok: true, message: `Stopped collecting weather for ${job.location}` }),
+        }],
       };
     }
   );
