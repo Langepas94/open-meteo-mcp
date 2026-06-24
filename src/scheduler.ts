@@ -38,9 +38,9 @@ export function isRunning(id: string): boolean {
   return activeTasks.has(id);
 }
 
-// Restore all persisted jobs on server start
+// Restore all persisted jobs on server start (all sessions)
 export function restoreJobs() {
-  for (const job of jobsRepo.list()) {
+  for (const job of jobsRepo.listAll()) {
     startJob(job);
   }
 }

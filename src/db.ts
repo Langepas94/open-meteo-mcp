@@ -32,8 +32,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_readings_job_time ON readings(job_id, fetched_at);
 `);
 
+// migrate: add session_id if absent (existing DBs won't have it)
+try {
+  db.exec(`ALTER TABLE jobs ADD COLUMN session_id TEXT NOT NULL DEFAULT 'default'`);
+} catch { /* column already exists */ }
+
+db.exec(`CREATE INDEX IF NOT EXISTS idx_jobs_session ON jobs(session_id)`);
+
 export interface Job {
   id: string;
+  session_id: string;
   cron_expr: string;
   latitude: number;
   longitude: number;
@@ -52,12 +60,20 @@ export interface Reading {
 export const jobsRepo = {
   insert(job: Job) {
     db.prepare(`
-      INSERT INTO jobs (id, cron_expr, latitude, longitude, location, variables, created_at)
-      VALUES (@id, @cron_expr, @latitude, @longitude, @location, @variables, @created_at)
+      INSERT INTO jobs (id, session_id, cron_expr, latitude, longitude, location, variables, created_at)
+      VALUES (@id, @session_id, @cron_expr, @latitude, @longitude, @location, @variables, @created_at)
     `).run({ ...job, variables: JSON.stringify(job.variables) });
   },
 
-  list(): Job[] {
+  listBySession(session_id: string): Job[] {
+    const rows = db.prepare(
+      "SELECT * FROM jobs WHERE session_id = ? ORDER BY created_at DESC"
+    ).all(session_id) as Array<Job & { variables: string }>;
+    return rows.map((r) => ({ ...r, variables: JSON.parse(r.variables) }));
+  },
+
+  // used by restoreJobs on startup — restore ALL jobs regardless of session
+  listAll(): Job[] {
     const rows = db.prepare("SELECT * FROM jobs ORDER BY created_at DESC").all() as Array<Job & { variables: string }>;
     return rows.map((r) => ({ ...r, variables: JSON.parse(r.variables) }));
   },
