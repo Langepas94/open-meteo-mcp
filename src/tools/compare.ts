@@ -1,0 +1,337 @@
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { z } from "zod";
+import { openMeteoFetch } from "../client.js";
+
+// ── types ─────────────────────────────────────────────────────────────────
+
+interface GeoResult {
+  name: string;
+  latitude: number;
+  longitude: number;
+  country: string;
+  admin1?: string;
+  timezone: string;
+}
+
+interface DailyForecast {
+  time: string[];
+  temperature_2m_max: number[];
+  temperature_2m_min: number[];
+  precipitation_sum: number[];
+  precipitation_probability_max: number[];
+  wind_speed_10m_max: number[];
+  weather_code: number[];
+  uv_index_max: number[];
+  sunshine_duration: number[];
+}
+
+interface LocationWeather {
+  label: string;
+  latitude: number;
+  longitude: number;
+  country?: string;
+  date: string;
+  temp_max: number;
+  temp_min: number;
+  temp_avg: number;
+  precipitation_mm: number;
+  rain_probability_pct: number;
+  wind_speed_kmh: number;
+  uv_index: number;
+  sunshine_hours: number;
+  weather_description: string;
+  score: number;
+}
+
+// ── WMO weather code → description ───────────────────────────────────────
+
+function wmoDescription(code: number): string {
+  if (code === 0) return "Clear sky";
+  if (code <= 2) return "Mainly clear";
+  if (code === 3) return "Overcast";
+  if (code <= 49) return "Fog";
+  if (code <= 59) return "Drizzle";
+  if (code <= 69) return "Rain";
+  if (code <= 79) return "Snow";
+  if (code <= 82) return "Rain showers";
+  if (code <= 84) return "Snow showers";
+  if (code <= 99) return "Thunderstorm";
+  return "Unknown";
+}
+
+// ── scoring ───────────────────────────────────────────────────────────────
+// Higher = better. Penalties for rain, wind, cold; bonuses for sunshine, warmth.
+
+function scoreDayWeather(w: Omit<LocationWeather, "score" | "label" | "date" | "latitude" | "longitude" | "country" | "weather_description">) {
+  let score = 100;
+  // Rain penalty
+  score -= w.precipitation_mm * 8;
+  score -= w.rain_probability_pct * 0.5;
+  // Wind penalty
+  if (w.wind_speed_kmh > 30) score -= (w.wind_speed_kmh - 30) * 0.8;
+  // Temperature: sweet spot 18-28°C
+  const midTemp = w.temp_avg;
+  if (midTemp < 15) score -= (15 - midTemp) * 2;
+  if (midTemp > 32) score -= (midTemp - 32) * 1.5;
+  // Sunshine bonus
+  score += w.sunshine_hours * 3;
+  // UV guard
+  if (w.uv_index > 8) score -= (w.uv_index - 8) * 2;
+  return Math.round(score);
+}
+
+// ── geocode helper ────────────────────────────────────────────────────────
+
+async function geocodeCity(name: string, language: string): Promise<GeoResult | null> {
+  const res = await openMeteoFetch("https://geocoding-api.open-meteo.com/v1/search", {
+    name,
+    count: 1,
+    language,
+  }) as { results?: GeoResult[] };
+  return res.results?.[0] ?? null;
+}
+
+// ── forecast for one point ────────────────────────────────────────────────
+
+async function fetchDayForecast(lat: number, lon: number, targetDate: string): Promise<DailyForecast | null> {
+  const res = await openMeteoFetch("https://api.open-meteo.com/v1/forecast", {
+    latitude: lat,
+    longitude: lon,
+    daily: [
+      "temperature_2m_max", "temperature_2m_min",
+      "precipitation_sum", "precipitation_probability_max",
+      "wind_speed_10m_max", "weather_code", "uv_index_max", "sunshine_duration",
+    ],
+    timezone: "auto",
+    forecast_days: 16,
+  }) as { daily?: DailyForecast };
+
+  const daily = res.daily;
+  if (!daily) return null;
+
+  const idx = daily.time.indexOf(targetDate);
+  if (idx === -1) return null;
+
+  // Return single-element slices for the target date
+  return {
+    time: [daily.time[idx]],
+    temperature_2m_max: [daily.temperature_2m_max[idx]],
+    temperature_2m_min: [daily.temperature_2m_min[idx]],
+    precipitation_sum: [daily.precipitation_sum[idx] ?? 0],
+    precipitation_probability_max: [daily.precipitation_probability_max[idx] ?? 0],
+    wind_speed_10m_max: [daily.wind_speed_10m_max[idx] ?? 0],
+    weather_code: [daily.weather_code[idx]],
+    uv_index_max: [daily.uv_index_max[idx] ?? 0],
+    sunshine_duration: [daily.sunshine_duration[idx] ?? 0],
+  };
+}
+
+function dailyToWeather(geo: { label: string; latitude: number; longitude: number; country?: string }, daily: DailyForecast): LocationWeather {
+  const temp_max = daily.temperature_2m_max[0];
+  const temp_min = daily.temperature_2m_min[0];
+  const precipitation_mm = daily.precipitation_sum[0];
+  const rain_probability_pct = daily.precipitation_probability_max[0];
+  const wind_speed_kmh = daily.wind_speed_10m_max[0];
+  const uv_index = daily.uv_index_max[0];
+  const sunshine_hours = +(daily.sunshine_duration[0] / 3600).toFixed(1);
+  const weather_description = wmoDescription(daily.weather_code[0]);
+  const temp_avg = +((temp_max + temp_min) / 2).toFixed(1);
+
+  const score = scoreDayWeather({ temp_max, temp_min, temp_avg, precipitation_mm, rain_probability_pct, wind_speed_kmh, uv_index, sunshine_hours });
+
+  return {
+    ...geo,
+    date: daily.time[0],
+    temp_max, temp_min, temp_avg,
+    precipitation_mm,
+    rain_probability_pct,
+    wind_speed_kmh,
+    uv_index,
+    sunshine_hours,
+    weather_description,
+    score,
+  };
+}
+
+// ── grid point generation for region mode ────────────────────────────────
+
+function gridPoints(centerLat: number, centerLon: number, radiusKm: number): Array<{ lat: number; lon: number; distKm: number; direction: string }> {
+  const stepKm = Math.max(30, Math.round(radiusKm / 4));
+  const R = 6371;
+  const points: Array<{ lat: number; lon: number; distKm: number; direction: string }> = [];
+
+  const latStep = (stepKm / R) * (180 / Math.PI);
+  const lonStep = (stepKm / R) * (180 / Math.PI) / Math.cos(centerLat * Math.PI / 180);
+
+  const DIRECTIONS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW", "Center"];
+
+  for (let dlat = -radiusKm; dlat <= radiusKm; dlat += stepKm) {
+    for (let dlon = -radiusKm; dlon <= radiusKm; dlon += stepKm) {
+      const distKm = Math.sqrt(dlat ** 2 + dlon ** 2);
+      if (distKm > radiusKm) continue;
+
+      const lat = +(centerLat + (dlat / R) * (180 / Math.PI)).toFixed(4);
+      const lon = +(centerLon + (dlon / R) * (180 / Math.PI) / Math.cos(centerLat * Math.PI / 180)).toFixed(4);
+
+      let dir = "Center";
+      if (distKm > stepKm * 0.3) {
+        const angle = Math.atan2(dlon, dlat) * 180 / Math.PI;
+        const idx = Math.round(((angle + 360) % 360) / 45) % 8;
+        dir = DIRECTIONS[idx];
+      }
+      const label = distKm < stepKm * 0.3 ? "Center" : `${Math.round(distKm)} km ${dir}`;
+      points.push({ lat, lon, distKm: Math.round(distKm), direction: label });
+    }
+  }
+
+  // Deduplicate by rounded coords
+  const seen = new Set<string>();
+  return points.filter(p => {
+    const key = `${p.lat},${p.lon}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+// ── format output ─────────────────────────────────────────────────────────
+
+function formatResults(results: LocationWeather[], date: string) {
+  const ranked = [...results].sort((a, b) => b.score - a.score);
+  const best = ranked[0];
+
+  const table = ranked.map((r, i) => ({
+    rank: i + 1,
+    location: r.label,
+    country: r.country,
+    score: r.score,
+    weather: r.weather_description,
+    temp: `${r.temp_min}–${r.temp_max}°C`,
+    rain_mm: r.precipitation_mm,
+    rain_probability: `${r.rain_probability_pct}%`,
+    wind_kmh: r.wind_speed_kmh,
+    sunshine_h: r.sunshine_hours,
+    uv_index: r.uv_index,
+  }));
+
+  return {
+    date,
+    best_location: {
+      name: best.label,
+      score: best.score,
+      summary: `${best.weather_description}, ${best.temp_min}–${best.temp_max}°C, rain: ${best.precipitation_mm}mm (${best.rain_probability_pct}%), wind: ${best.wind_speed_kmh} km/h, sun: ${best.sunshine_hours}h`,
+    },
+    ranking: table,
+    note: "Score: higher = better weather. Penalizes rain, strong wind, extreme temperatures. Rewards sunshine and mild warmth.",
+  };
+}
+
+// ── register tools ────────────────────────────────────────────────────────
+
+export function registerCompareTools(server: McpServer) {
+
+  // Tool 1: compare named cities
+  server.registerTool(
+    "compare_weather_cities",
+    {
+      description:
+        "Compare weather across multiple cities on a specific date. " +
+        "Returns a ranked list showing which city has the best weather conditions. " +
+        "Useful for trip planning: 'Where should I go this weekend?'",
+      inputSchema: z.object({
+        cities: z.array(z.string()).min(2).max(20)
+          .describe("List of city names to compare, e.g. ['Moscow', 'Saint Petersburg', 'Sochi']"),
+        date: z.string()
+          .describe("Target date in YYYY-MM-DD format. Must be within the next 16 days."),
+        language: z.string().optional().default("en")
+          .describe("Language for city name results (ISO 639-1, e.g. 'ru', 'en')"),
+      }),
+    },
+    async (params) => {
+      const results: LocationWeather[] = [];
+      const errors: string[] = [];
+
+      await Promise.all(params.cities.map(async (city) => {
+        try {
+          const geo = await geocodeCity(city, params.language);
+          if (!geo) { errors.push(`Not found: ${city}`); return; }
+
+          const daily = await fetchDayForecast(geo.latitude, geo.longitude, params.date);
+          if (!daily) { errors.push(`No forecast for ${city} on ${params.date}`); return; }
+
+          results.push(dailyToWeather({
+            label: geo.admin1 ? `${geo.name}, ${geo.admin1}` : geo.name,
+            latitude: geo.latitude,
+            longitude: geo.longitude,
+            country: geo.country,
+          }, daily));
+        } catch (e) {
+          errors.push(`Error for ${city}: ${String(e)}`);
+        }
+      }));
+
+      if (results.length === 0) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "No results", details: errors }) }] };
+      }
+
+      const output = { ...formatResults(results, params.date), errors: errors.length ? errors : undefined };
+      return { content: [{ type: "text", text: JSON.stringify(output, null, 2) }] };
+    }
+  );
+
+  // Tool 2: compare grid points within a radius
+  server.registerTool(
+    "compare_weather_region",
+    {
+      description:
+        "Compare weather across a region: specify a center city and radius in km. " +
+        "Automatically samples grid points within that radius and finds the spot with the best weather. " +
+        "Great for: 'Where within 200 km of Moscow will it be dry this Saturday?'",
+      inputSchema: z.object({
+        center_city: z.string()
+          .describe("Center of the search region, e.g. 'Moscow'"),
+        radius_km: z.number().min(30).max(1000)
+          .describe("Search radius in kilometers (30–1000 km)"),
+        date: z.string()
+          .describe("Target date in YYYY-MM-DD format. Must be within the next 16 days."),
+        language: z.string().optional().default("en"),
+      }),
+    },
+    async (params) => {
+      const centerGeo = await geocodeCity(params.center_city, params.language);
+      if (!centerGeo) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: `City not found: ${params.center_city}` }) }] };
+      }
+
+      const points = gridPoints(centerGeo.latitude, centerGeo.longitude, params.radius_km);
+
+      const results: LocationWeather[] = [];
+
+      await Promise.all(points.map(async (pt) => {
+        try {
+          const daily = await fetchDayForecast(pt.lat, pt.lon, params.date);
+          if (!daily) return;
+          results.push(dailyToWeather({
+            label: pt.direction,
+            latitude: pt.lat,
+            longitude: pt.lon,
+          }, daily));
+        } catch {
+          // skip failed points silently
+        }
+      }));
+
+      if (results.length === 0) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "No forecast data available" }) }] };
+      }
+
+      const output = {
+        center: `${centerGeo.name}, ${centerGeo.country}`,
+        radius_km: params.radius_km,
+        points_sampled: results.length,
+        ...formatResults(results, params.date),
+      };
+      return { content: [{ type: "text", text: JSON.stringify(output, null, 2) }] };
+    }
+  );
+}

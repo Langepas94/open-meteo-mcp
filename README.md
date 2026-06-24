@@ -28,6 +28,19 @@ MCP server for [Open-Meteo](https://open-meteo.com/) — free weather APIs, no A
 | `get_dwd_icon` | DWD ICON model — high-res for Europe |
 | `get_ecmwf` | ECMWF IFS model — gold standard global forecast |
 
+### Weather comparison
+
+| Tool | Description |
+|------|-------------|
+| `compare_weather_cities` | Compare named cities on a date → ranked by weather quality score |
+| `compare_weather_region` | Center city + radius km → grid sample → best spot in the area |
+
+Score factors: sunshine, temperature comfort (18–28°C sweet spot), precipitation, wind, UV.
+
+Example prompts:
+- *"Moscow, Sochi, Kazan this Saturday — where's best?"* → `compare_weather_cities`
+- *"Best weather within 300 km of Moscow next Sunday?"* → `compare_weather_region`
+
 ### Scheduled collection
 
 | Tool | Description |

@@ -14,6 +14,7 @@ import {
   registerDwdIcon,
   registerEcmwf,
   registerScheduleTools,
+  registerCompareTools,
 } from "./tools/index.js";
 import { restoreJobs } from "./scheduler.js";
 
@@ -35,6 +36,7 @@ registerSeasonal(server);
 registerDwdIcon(server);
 registerEcmwf(server);
 registerScheduleTools(server);
+registerCompareTools(server);
 
 // Resume persisted jobs after restart
 restoreJobs();
