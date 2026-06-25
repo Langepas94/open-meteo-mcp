@@ -30,6 +30,20 @@ db.exec(`
   );
 
   CREATE INDEX IF NOT EXISTS idx_readings_job_time ON readings(job_id, fetched_at);
+
+  CREATE TABLE IF NOT EXISTS pipeline_results (
+    id           TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    created_at   INTEGER NOT NULL,
+    question     TEXT,
+    best_label   TEXT NOT NULL,
+    best_date    TEXT NOT NULL,
+    best_score   REAL NOT NULL,
+    explanation  TEXT NOT NULL,
+    payload      TEXT NOT NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_results_session ON pipeline_results(session_id, created_at);
 `);
 
 // migrate: add session_id if absent (existing DBs won't have it)
@@ -55,6 +69,18 @@ export interface Reading {
   job_id: string;
   fetched_at: number;
   data: Record<string, unknown>;
+}
+
+export interface PipelineResult {
+  id: string;
+  session_id: string;
+  created_at: number;
+  question: string | null;
+  best_label: string;
+  best_date: string;
+  best_score: number;
+  explanation: string;
+  payload: Record<string, unknown>;
 }
 
 export const jobsRepo = {
@@ -106,5 +132,28 @@ export const readingsRepo = {
   countByJob(job_id: string): number {
     const row = db.prepare("SELECT COUNT(*) as n FROM readings WHERE job_id = ?").get(job_id) as { n: number };
     return row.n;
+  },
+};
+
+export const resultsRepo = {
+  insert(r: PipelineResult) {
+    db.prepare(`
+      INSERT INTO pipeline_results
+        (id, session_id, created_at, question, best_label, best_date, best_score, explanation, payload)
+      VALUES (@id, @session_id, @created_at, @question, @best_label, @best_date, @best_score, @explanation, @payload)
+    `).run({ ...r, payload: JSON.stringify(r.payload) });
+  },
+
+  get(id: string): PipelineResult | undefined {
+    const row = db.prepare("SELECT * FROM pipeline_results WHERE id = ?").get(id) as (PipelineResult & { payload: string }) | undefined;
+    if (!row) return undefined;
+    return { ...row, payload: JSON.parse(row.payload) };
+  },
+
+  listBySession(session_id: string, limit = 20): PipelineResult[] {
+    const rows = db.prepare(
+      "SELECT * FROM pipeline_results WHERE session_id = ? ORDER BY created_at DESC LIMIT ?"
+    ).all(session_id, limit) as Array<PipelineResult & { payload: string }>;
+    return rows.map((r) => ({ ...r, payload: JSON.parse(r.payload) }));
   },
 };
