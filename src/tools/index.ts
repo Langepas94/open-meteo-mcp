@@ -11,5 +11,4 @@ export { registerSeasonal } from "./seasonal.js";
 export { registerDwdIcon } from "./dwd-icon.js";
 export { registerEcmwf } from "./ecmwf.js";
 export { registerScheduleTools } from "./schedule.js";
-export { registerCompareTools } from "./compare.js";
-export { registerPipelineTools } from "./pipeline.js";
+export { registerAnalyzeTools } from "./analyze.js";

@@ -17,8 +17,7 @@ import {
   registerDwdIcon,
   registerEcmwf,
   registerScheduleTools,
-  registerCompareTools,
-  registerPipelineTools,
+  registerAnalyzeTools,
 } from "./tools/index.js";
 import { restoreJobs } from "./scheduler.js";
 import { registerSession, unregisterSession } from "./notifications.js";
@@ -26,7 +25,7 @@ import { registerSession, unregisterSession } from "./notifications.js";
 function createMcpServer() {
   // `logging` capability lets the server push summaries via logging notifications.
   const server = new McpServer(
-    { name: "open-meteo", version: "1.4.0" },
+    { name: "open-meteo", version: "2.0.0" },
     { capabilities: { logging: {} } }
   );
   registerForecast(server);
@@ -42,8 +41,7 @@ function createMcpServer() {
   registerDwdIcon(server);
   registerEcmwf(server);
   registerScheduleTools(server);
-  registerCompareTools(server);
-  registerPipelineTools(server);
+  registerAnalyzeTools(server);
   return server;
 }
 
