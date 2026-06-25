@@ -12,3 +12,4 @@ export { registerDwdIcon } from "./dwd-icon.js";
 export { registerEcmwf } from "./ecmwf.js";
 export { registerScheduleTools } from "./schedule.js";
 export { registerCompareTools } from "./compare.js";
+export { registerPipelineTools } from "./pipeline.js";
