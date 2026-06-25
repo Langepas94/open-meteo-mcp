@@ -1,6 +1,7 @@
 import * as cron from "node-cron";
 import { jobsRepo, readingsRepo, type Job } from "./db.js";
 import { openMeteoFetch } from "./client.js";
+import { pushSummaryForJob } from "./notifications.js";
 
 // active cron tasks, keyed by job id
 const activeTasks = new Map<string, cron.ScheduledTask>();
@@ -18,6 +19,9 @@ async function runJob(job: Job) {
   } catch (err) {
     readingsRepo.insert(job.id, { error: String(err), fetched_at: Date.now() });
   }
+  // Push a fresh summary to any subscribed client (no-op if none). This is what
+  // makes periodic delivery server-driven: clients receive without polling.
+  await pushSummaryForJob(job.id, job.session_id);
 }
 
 export function startJob(job: Job) {

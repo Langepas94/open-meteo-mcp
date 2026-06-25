@@ -3,6 +3,8 @@ import { z } from "zod";
 import { randomUUID } from "crypto";
 import { jobsRepo, readingsRepo } from "../db.js";
 import { startJob, stopJob, isRunning } from "../scheduler.js";
+import { summarize } from "../summarize.js";
+import { subscribe, unsubscribe } from "../notifications.js";
 
 const INTERVAL_CRON: Record<string, string> = {
   "10min":  "*/10 * * * *",
@@ -12,15 +14,6 @@ const INTERVAL_CRON: Record<string, string> = {
   "12h":    "0 */12 * * *",
   "daily":  "0 9 * * *",
   "weekly": "0 9 * * 1",
-};
-
-const PERIOD_MS: Record<string, number> = {
-  "1h":  1 * 60 * 60 * 1000,
-  "6h":  6 * 60 * 60 * 1000,
-  "12h": 12 * 60 * 60 * 1000,
-  "24h": 24 * 60 * 60 * 1000,
-  "7d":  7 * 24 * 60 * 60 * 1000,
-  "30d": 30 * 24 * 60 * 60 * 1000,
 };
 
 export function registerScheduleTools(server: McpServer) {
@@ -120,21 +113,17 @@ export function registerScheduleTools(server: McpServer) {
       }),
     },
     async (params) => {
-      const job = jobsRepo.get(params.job_id);
-      if (!job || job.session_id !== params.session_id) {
+      const summary = summarize(params.job_id, params.period);
+      if (!summary || summary.session_id !== params.session_id) {
         return { content: [{ type: "text", text: JSON.stringify({ error: "Job not found" }) }] };
       }
-
-      const sinceMs = Date.now() - (PERIOD_MS[params.period] ?? PERIOD_MS["24h"]);
-      const readings = readingsRepo.getRecent(params.job_id, sinceMs);
-
-      if (readings.length === 0) {
+      if (summary.readings_count === 0) {
         return {
           content: [{
             type: "text",
             text: JSON.stringify({
               job_id: params.job_id,
-              location: job.location,
+              location: summary.location,
               period: params.period,
               readings: 0,
               message: "No data collected yet — check back after the first interval fires",
@@ -142,44 +131,48 @@ export function registerScheduleTools(server: McpServer) {
           }],
         };
       }
+      return { content: [{ type: "text", text: JSON.stringify(summary, null, 2) }] };
+    }
+  );
 
-      const buckets: Record<string, number[]> = {};
-      for (const reading of readings) {
-        const hourly = (reading.data as { hourly?: Record<string, unknown[]> }).hourly;
-        if (!hourly) continue;
-        for (const [varName, values] of Object.entries(hourly)) {
-          if (varName === "time") continue;
-          if (!buckets[varName]) buckets[varName] = [];
-          for (const v of values) {
-            if (typeof v === "number") buckets[varName].push(v);
-          }
-        }
+  // ── subscribe_summaries ─────────────────────────────────────────────────
+  server.registerTool(
+    "subscribe_summaries",
+    {
+      description:
+        "Subscribe THIS connection to server-pushed weather summaries: after each " +
+        "collection the server sends a logging notification (logger 'weather_summary') " +
+        "with the aggregated stats, so the client receives periodic summaries WITHOUT polling. " +
+        "Call after scheduling a collection job. The client relays the push to its user.",
+      inputSchema: z.object({
+        session_id: z.string().min(1).max(128).describe("Same session_id used when creating jobs."),
+        period: z.enum(["1h", "6h", "12h", "24h", "7d", "30d"]).optional().default("1h")
+          .describe("Aggregation window for each pushed summary."),
+      }),
+    },
+    async (params, extra) => {
+      if (!extra.sessionId) {
+        return { content: [{ type: "text", text: JSON.stringify({ error: "push requires a stateful session (no sessionId)" }) }] };
       }
-
-      const stats: Record<string, { min: number; max: number; avg: number; count: number }> = {};
-      for (const [varName, values] of Object.entries(buckets)) {
-        stats[varName] = {
-          min: +Math.min(...values).toFixed(2),
-          max: +Math.max(...values).toFixed(2),
-          avg: +(values.reduce((a, b) => a + b, 0) / values.length).toFixed(2),
-          count: values.length,
-        };
-      }
-
+      subscribe(extra.sessionId, params.session_id, params.period);
       return {
-        content: [{
-          type: "text",
-          text: JSON.stringify({
-            job_id: params.job_id,
-            location: job.location,
-            period: params.period,
-            readings_count: readings.length,
-            first_reading: new Date(readings[0].fetched_at).toISOString(),
-            last_reading: new Date(readings[readings.length - 1].fetched_at).toISOString(),
-            stats,
-          }, null, 2),
-        }],
+        content: [{ type: "text", text: JSON.stringify({ ok: true, message: `Subscribed to pushed summaries (period ${params.period})` }) }],
       };
+    }
+  );
+
+  // ── unsubscribe_summaries ───────────────────────────────────────────────
+  server.registerTool(
+    "unsubscribe_summaries",
+    {
+      description: "Stop receiving server-pushed weather summaries for this session.",
+      inputSchema: z.object({
+        session_id: z.string().min(1).max(128),
+      }),
+    },
+    async (params, extra) => {
+      const removed = extra.sessionId ? unsubscribe(extra.sessionId, params.session_id) : false;
+      return { content: [{ type: "text", text: JSON.stringify({ ok: true, removed }) }] };
     }
   );
 
