@@ -4,6 +4,7 @@ import {
   scoreActivityDay,
   wmoDescription,
   weekdayOf,
+  gridPoints,
   type NDay,
 } from "../src/tools/weather-logic.js";
 
@@ -43,6 +44,22 @@ describe("normalizeDaily", () => {
     expect(days[0]).toMatchObject({ date: "2026-06-27", temp_avg: 19, sunshine_hours: 10, weather: "Clear sky" });
     expect(days[0].wind_speed_kmh).toBe(0);          // missing → neutral
     expect(days[1]).toMatchObject({ precipitation_mm: 5, weather: "Rain" });
+  });
+});
+
+describe("gridPoints", () => {
+  it("samples points all within the radius, labeled by distance/direction", () => {
+    const pts = gridPoints(55.75, 37.62, 100);
+    expect(pts.length).toBeGreaterThan(1);
+    expect(pts.every((p) => p.distance_km <= 100)).toBe(true);
+    expect(pts.some((p) => p.label === "Center")).toBe(true);
+    expect(pts.some((p) => /km (N|NE|E|SE|S|SW|W|NW)$/.test(p.label))).toBe(true);
+  });
+
+  it("deduplicates coordinates", () => {
+    const pts = gridPoints(0, 0, 200);
+    const keys = pts.map((p) => `${p.latitude},${p.longitude}`);
+    expect(new Set(keys).size).toBe(keys.length);
   });
 });
 

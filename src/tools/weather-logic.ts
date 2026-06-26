@@ -96,6 +96,51 @@ function num(v: unknown): number {
   return typeof v === "number" && Number.isFinite(v) ? v : 0;
 }
 
+// ── grid sampling within a radius ──────────────────────────────────────────
+// Generate sample coordinates inside `radiusKm` of a center point, each labeled
+// by distance + compass direction. Pure geometry — no reverse-geocoding, so
+// points are positions ("50 km NE"), not city names.
+
+export interface GridPoint {
+  latitude: number;
+  longitude: number;
+  distance_km: number;
+  label: string;
+}
+
+export function gridPoints(centerLat: number, centerLon: number, radiusKm: number): GridPoint[] {
+  const stepKm = Math.max(25, Math.round(radiusKm / 4));
+  const R = 6371;
+  const DIRECTIONS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+  const out: GridPoint[] = [];
+  const seen = new Set<string>();
+
+  for (let dlat = -radiusKm; dlat <= radiusKm; dlat += stepKm) {
+    for (let dlon = -radiusKm; dlon <= radiusKm; dlon += stepKm) {
+      const distKm = Math.round(Math.sqrt(dlat ** 2 + dlon ** 2));
+      if (distKm > radiusKm) continue;
+
+      const latitude = +(centerLat + (dlat / R) * (180 / Math.PI)).toFixed(4);
+      const longitude = +(centerLon + (dlon / R) * (180 / Math.PI) / Math.cos(centerLat * Math.PI / 180)).toFixed(4);
+
+      const key = `${latitude},${longitude}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      let label: string;
+      if (distKm < stepKm * 0.3) {
+        label = "Center";
+      } else {
+        const angle = Math.atan2(dlon, dlat) * 180 / Math.PI;
+        const dir = DIRECTIONS[Math.round(((angle + 360) % 360) / 45) % 8];
+        label = `${distKm} km ${dir}`;
+      }
+      out.push({ latitude, longitude, distance_km: distKm, label });
+    }
+  }
+  return out;
+}
+
 // ── activity profiles ──────────────────────────────────────────────────────
 // Each profile expresses how an activity weighs weather. Higher score = better.
 
