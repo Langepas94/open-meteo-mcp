@@ -256,7 +256,7 @@ export function registerAnalyzeTools(server: McpServer) {
       inputSchema: z.object({
         center_latitude: z.number().min(-90).max(90).describe("Center latitude (from geocode)."),
         center_longitude: z.number().min(-180).max(180).describe("Center longitude (from geocode)."),
-        radius_km: z.number().min(25).max(1000).describe("Search radius in kilometers."),
+        radius_km: z.number().min(25).max(1000).optional().default(100).describe("Search radius in kilometers (default 100)."),
       }),
     },
     async (params) => {
