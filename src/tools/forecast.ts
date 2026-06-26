@@ -28,16 +28,27 @@ const DailyVar = z.enum([
   "shortwave_radiation_sum", "et0_fao_evapotranspiration"
 ]);
 
+// Resolve a city name to coordinates via the geocoding API (so callers can pass
+// a name directly instead of chaining geocode → get_forecast for plumbing).
+async function resolveLocation(name: string, language: string): Promise<{ latitude: number; longitude: number; name: string } | null> {
+  const res = await openMeteoFetch("https://geocoding-api.open-meteo.com/v1/search", {
+    name, count: 1, language,
+  }) as { results?: Array<{ latitude: number; longitude: number; name: string }> };
+  return res.results?.[0] ?? null;
+}
+
 export function registerForecast(server: McpServer) {
   server.registerTool(
     "get_forecast",
     {
       description:
         "Get weather forecast for a location. Returns hourly and/or daily data up to 16 days ahead. " +
+        "Pass EITHER `location` (a city name, resolved automatically) OR explicit latitude+longitude. " +
         "Provide at least one of: hourly or daily variable lists.",
       inputSchema: z.object({
-        latitude: z.number().min(-90).max(90).describe("Latitude in decimal degrees"),
-        longitude: z.number().min(-180).max(180).describe("Longitude in decimal degrees"),
+        location: z.string().optional().describe("City name to fetch, e.g. 'Moscow'. Resolved to coordinates automatically. Use this OR latitude+longitude."),
+        latitude: z.number().min(-90).max(90).optional().describe("Latitude in decimal degrees (omit if `location` is given)"),
+        longitude: z.number().min(-180).max(180).optional().describe("Longitude in decimal degrees (omit if `location` is given)"),
         hourly: z.array(HourlyVar).optional().describe("Hourly variables to retrieve"),
         daily: z.array(DailyVar).optional().describe("Daily variables to retrieve"),
         timezone: z.string().optional().default("auto").describe("Timezone name (e.g. Europe/Moscow) or 'auto'"),
@@ -46,11 +57,30 @@ export function registerForecast(server: McpServer) {
         temperature_unit: z.enum(["celsius", "fahrenheit"]).optional().default("celsius"),
         wind_speed_unit: z.enum(["kmh", "ms", "mph", "kn"]).optional().default("kmh"),
         precipitation_unit: z.enum(["mm", "inch"]).optional().default("mm"),
+        language: z.string().optional().default("en").describe("Language for resolving `location` name (ISO 639-1)"),
       }),
     },
     async (params) => {
-      const data = await openMeteoFetch("https://api.open-meteo.com/v1/forecast", params);
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
+      const { location, language, ...rest } = params;
+      let { latitude, longitude } = rest;
+      let resolved: string | undefined;
+
+      if (latitude === undefined || longitude === undefined) {
+        if (!location) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: "Provide `location` (city name) or both latitude and longitude." }) }] };
+        }
+        const geo = await resolveLocation(location, language ?? "en");
+        if (!geo) {
+          return { content: [{ type: "text", text: JSON.stringify({ error: `Location not found: ${location}` }) }] };
+        }
+        latitude = geo.latitude;
+        longitude = geo.longitude;
+        resolved = geo.name;
+      }
+
+      const data = await openMeteoFetch("https://api.open-meteo.com/v1/forecast", { ...rest, latitude, longitude });
+      const out = resolved ? { resolved_location: resolved, ...(data as object) } : data;
+      return { content: [{ type: "text", text: JSON.stringify(out, null, 2) }] };
     }
   );
 }
