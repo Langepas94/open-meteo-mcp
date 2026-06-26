@@ -25,7 +25,7 @@ import { registerSession, unregisterSession } from "./notifications.js";
 function createMcpServer() {
   // `logging` capability lets the server push summaries via logging notifications.
   const server = new McpServer(
-    { name: "open-meteo", version: "2.0.0" },
+    { name: "open-meteo", version: "2.1.0" },
     { capabilities: { logging: {} } }
   );
   registerForecast(server);
