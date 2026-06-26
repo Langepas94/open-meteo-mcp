@@ -7,6 +7,7 @@ import {
   normalizeDaily,
   wmoDescription,
   scoreActivityDay,
+  gridPoints,
 } from "./weather-logic.js";
 
 // ── shared schemas ─────────────────────────────────────────────────────────
@@ -240,6 +241,32 @@ export function registerAnalyzeTools(server: McpServer) {
         return row;
       });
       return jsonResult({ locations: params.locations.map((l) => l.label), table });
+    }
+  );
+
+  // ── grid_points — sample coordinates within a radius ─────────────────────
+  server.registerTool(
+    "grid_points",
+    {
+      description:
+        "Generate sample coordinates within a radius of a center point, each labeled by distance + " +
+        "compass direction (e.g. '50 km NE'). Pure geometry — points are positions, not city names. " +
+        "Use to answer 'best weather within N km of <place>?': geocode the center → grid_points → " +
+        "get_forecast on each point → summarize_forecast → rank_weather.",
+      inputSchema: z.object({
+        center_latitude: z.number().min(-90).max(90).describe("Center latitude (from geocode)."),
+        center_longitude: z.number().min(-180).max(180).describe("Center longitude (from geocode)."),
+        radius_km: z.number().min(25).max(1000).describe("Search radius in kilometers."),
+      }),
+    },
+    async (params) => {
+      const points = gridPoints(params.center_latitude, params.center_longitude, params.radius_km);
+      return jsonResult({
+        radius_km: params.radius_km,
+        count: points.length,
+        note: "Feed each point's latitude/longitude into get_forecast, then summarize_forecast + rank_weather.",
+        points,
+      });
     }
   );
 
